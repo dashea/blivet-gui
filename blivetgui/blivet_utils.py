@@ -26,6 +26,7 @@ from __future__ import print_function
 import blivet
 
 from blivet.devices import PartitionDevice, LUKSDevice, LVMVolumeGroupDevice, LVMLogicalVolumeDevice, BTRFSVolumeDevice, BTRFSSubVolumeDevice, MDRaidArrayDevice, LVMSnapShotDevice, LVMThinLogicalVolumeDevice, LVMThinPoolDevice
+from blivet.devices.lvm import LVMCacheRequest
 from blivet.formats import DeviceFormat
 
 from  .communication.proxy_utils import ProxyDataContainer
@@ -803,13 +804,21 @@ class BlivetUtils(object):
             create_class = LVMThinLogicalVolumeDevice
             # for thinlv, parent (for name suggestion) is not thinpool but the vg
             device_name = self._pick_device_name(user_input.name, user_input.parents[0][0].vg)
-        elif user_input.device_type == "lvmlv":
+        elif user_input.device_type in ("lvmlv", "lvmcache"):
             create_class = LVMLogicalVolumeDevice
             device_name = self._pick_device_name(user_input.name, user_input.parents[0][0])
 
+        if user_input.device_type == "lvmcache":
+            cache_request = LVMCacheRequest(size=user_input.cache.cache_size,
+                                            fast_pvs=user_input.cache.fast_pvs,
+                                            mode=user_input.cache.cache_mode)
+        else:
+            cache_request = None
+
         new_part = create_class(name=device_name,
                                 size=user_input.size,
-                                parents=[i[0] for i in user_input.parents])
+                                parents=[i[0] for i in user_input.parents],
+                                cacheRequest=cache_request)
         actions.append(blivet.deviceaction.ActionCreateDevice(new_part))
 
         new_fmt = blivet.formats.getFormat(fmt_type=user_input.filesystem,
@@ -1019,6 +1028,7 @@ class BlivetUtils(object):
     add_dict = {"partition" : _create_partition,
                 "lvm" : _create_lvm,
                 "lvmlv" : _create_lvmlv,
+                "lvmcache" : _create_lvmlv,
                 "lvmthinlv" : _create_lvmlv,
                 "lvmthinpool" : _create_lvmthinpool,
                 "lvmvg" : _create_lvmvg,
