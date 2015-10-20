@@ -226,6 +226,12 @@ class SizeChooserArea(object):
         if max_size:
             self.max_size = max_size
 
+        if self.get_selected_size() >= self.max_size:
+            self.set_selected_size(self.max_size)
+
+        if self.get_selected_size() <= self.min_size:
+            self.set_selected_size(self.min_size)
+
         self.adjust_size_scale(self.get_selected_size(), self.selected_unit)
 
     def set_selected_size(self, selected_size):

@@ -43,6 +43,8 @@ from ..communication.proxy_utils import ProxyDataContainer
 from . size_chooser import SizeChooserArea
 from .helpers import is_name_valid, is_label_valid, is_mountpoint_valid
 
+from blivetgui.gui_utils import locate_ui_file
+
 from ..i18n import _
 
 #------------------------------------------------------------------------------#
@@ -191,6 +193,104 @@ class AdvancedOptions(object):
         elif self.device_type in ("partition"):
             return {"parttype" : self.partition_combo.get_active_id()}
 
+class CacheArea(object):
+
+    def __init__(self, add_dialog, parent_pvs):
+
+        self.add_dialog = add_dialog
+        self.parent_pvs = parent_pvs
+
+        self.widgets = []
+
+        self.builder = Gtk.Builder()
+        self.builder.set_translation_domain("blivet-gui")
+        self.builder.add_from_file(locate_ui_file("cache_area.ui"))
+
+        self.frame = self.builder.get_object("frame")
+        self.grid = self.builder.get_object("grid")
+        self.combobox_mode = self.builder.get_object("combobox_mode")
+        self.liststore_pvs = self.builder.get_object("liststore_pvs")
+
+        handlers = {"on_cell_toggled" : self.on_cell_toggled}
+        self.builder.connect_signals(handlers)
+
+        self.add_pvs_list()
+        self.size_area = self.add_size_area()
+
+    def add_pvs_list(self):
+        for pv in self.parent_pvs:
+            self.liststore_pvs.append([pv, False, pv.name, "lvmpv", str(pv.size) , str(pv.format.pvFree)])
+
+    def add_size_area(self):
+        max_size = [p.format.pvFree for p in self.parent_pvs] if self.parent_pvs else size.Size("1 MiB")
+
+        area = SizeChooserArea(dialog_type="add", device_name="Cache LV",
+                               max_size=max_size,
+                               min_size=size.Size("1 MiB"),
+                               update_clbk=self.update_available_size)
+
+        area.set_sensitive(False)
+        self.widgets.append(area)
+        self.grid.attach(area.frame, 0, 3, 6, 1)
+        area.frame.set_tooltip_text(_("Please select at least one PV for cache device."))
+        area.show()
+
+        return area
+
+    def update_available_size(self, selected_size):
+        max_size = self.add_dialog.parent_device.free - selected_size - self.add_dialog.parent_device.peSize
+        self.add_dialog.update_size_areas_limits(max_size=max_size)
+
+    def on_cell_toggled(self, _event, path):
+        self.liststore_pvs[path][1] = not self.liststore_pvs[path][1]
+
+        max_size = self._get_max_cache_size()
+        if max_size > size.Size(0):
+            self.size_area.update_size_limits(max_size=max_size)
+            self.size_area.set_sensitive(True)
+        else:
+            self.size_area.set_sensitive(False)
+
+    def _get_max_cache_size(self):
+        max_size = size.Size(0)
+
+        for row in self.liststore_pvs:
+            if row[1]:
+                max_size += row[0].format.pvFree
+
+        # leave at least two PE for cached LV
+        max_size -= 2*self.add_dialog.parent_device.peSize
+
+        return max_size
+
+    def hide(self):
+        objects = self.builder.get_objects() + self.widgets
+
+        for obj in objects:
+            if hasattr(obj, "hide"):
+                obj.hide()
+
+    def show(self):
+        objects = self.builder.get_objects() + self.widgets
+
+        for obj in objects:
+            if hasattr(obj, "show"):
+                obj.show()
+
+    def get_selection(self):
+
+        cache_size = self.size_area.get_selection()
+        cache_mode = self.combobox_mode.get_active_id()
+
+        fast_pvs = []
+        for row in self.liststore_pvs:
+            if row[1]:
+                fast_pvs.append(row[0])
+
+        return ProxyDataContainer(fast_pvs=fast_pvs, cache_size=cache_size,
+                                  cache_mode=cache_mode)
+
+
 class AddDialog(Gtk.Dialog):
     """ Dialog window allowing user to add new partition including selecting
          size, fs, label etc.
@@ -266,6 +366,8 @@ class AddDialog(Gtk.Dialog):
 
         self.md_type_combo = self.add_md_type_chooser()
 
+        self.cache_area = self.add_cache_area()
+
         self.show_all()
         self.devices_combo.set_active(0)
 
@@ -306,6 +408,10 @@ class AddDialog(Gtk.Dialog):
 
             if self.parent_type == "disk" and self.free_device.size > size.Size("256 MiB"):
                 devices.append((_("Btrfs Volume"), "btrfs volume"))
+
+        if self.parent_type == "lvmvg":
+            if any(parent.format.pvFree > size.Size(0) for parent in self.parent_device.parents):
+                devices.append((_("LVM2 Cached Logical Volume"), "lvmcache"))
 
         devices_store = Gtk.ListStore(str, str)
 
@@ -406,7 +512,7 @@ class AddDialog(Gtk.Dialog):
 
         label_raid = Gtk.Label(label=_("RAID Level:"), xalign=1)
         label_raid.get_style_context().add_class("dim-label")
-        self.grid.attach(label_raid, 0, 5, 1, 1)
+        self.grid.attach(label_raid, 0, 6, 1, 1)
 
         raid_combo = Gtk.ComboBoxText()
         raid_combo.set_entry_text_column(0)
@@ -414,7 +520,7 @@ class AddDialog(Gtk.Dialog):
 
         raid_changed_signal = raid_combo.connect("changed", self.on_raid_type_changed)
 
-        self.grid.attach(raid_combo, 1, 5, 1, 1)
+        self.grid.attach(raid_combo, 1, 6, 1, 1)
 
         self.widgets_dict["raid"] = [label_raid, raid_combo]
 
@@ -538,7 +644,7 @@ class AddDialog(Gtk.Dialog):
 
         else:
             self.parents_store.append([self.parent_device, self.free_device, False, False,
-                self.parent_device.name, "disk", str(self.free_device.size)])
+                self.parent_device.name, self.parent_type, str(self.free_device.size)])
 
         self.select_selected_free_region()
 
@@ -633,7 +739,7 @@ class AddDialog(Gtk.Dialog):
 
         size_scroll = Gtk.ScrolledWindow()
         size_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
-        self.grid.attach(size_scroll, 0, 6, 6, 1)
+        self.grid.attach(size_scroll, 0, 7, 6, 1)
         size_scroll.show()
 
         size_grid = Gtk.Grid(column_homogeneous=False, row_spacing=10, column_spacing=5)
@@ -657,7 +763,12 @@ class AddDialog(Gtk.Dialog):
                 if not raid:
                     max_size = row[1].size
 
-                area = SizeChooserArea(dialog_type="add", device_name=row[0].name, max_size=max_size, min_size=min_size, update_clbk=self.update_size_areas_selections)
+                if device_type == "lvmcache":
+                    device_name = _("Cached LV on {vgname}").format(vgname=row[0].name)
+                else:
+                    device_name = row[0].name
+                area = SizeChooserArea(dialog_type="add", device_name=device_name, max_size=max_size,
+                                       min_size=min_size, update_clbk=self.update_size_areas_selections)
 
                 size_grid.attach(area.frame, 0, posititon, 1, 1)
 
@@ -713,10 +824,24 @@ class AddDialog(Gtk.Dialog):
 
         return size_grid, size_scroll
 
+    def add_cache_area(self):
+        if self.parent_type == "lvmvg":
+            free_pvs = [p for p in self.parent_device.parents if (p.format.pvFree > self.parent_device.peSize)]
+        else:
+            free_pvs = []
+
+        cache_area = CacheArea(self, free_pvs)
+
+        self.grid.attach(cache_area.frame, 0, 6, 6, 1)
+
+        self.widgets_dict["cache"] = [cache_area]
+
+        return cache_area
+
     def add_md_type_chooser(self):
         label_md_type = Gtk.Label(label=_("MDArray type:"), xalign=1)
         label_md_type.get_style_context().add_class("dim-label")
-        self.grid.attach(label_md_type, 0, 7, 1, 1)
+        self.grid.attach(label_md_type, 0, 8, 1, 1)
 
         md_type_store = Gtk.ListStore(str, str)
 
@@ -727,7 +852,7 @@ class AddDialog(Gtk.Dialog):
         md_type_combo = Gtk.ComboBox.new_with_model(md_type_store)
         md_type_combo.set_entry_text_column(0)
 
-        self.grid.attach(md_type_combo, 1, 7, 2, 1)
+        self.grid.attach(md_type_combo, 1, 8, 2, 1)
         renderer_text = Gtk.CellRendererText()
         md_type_combo.pack_start(renderer_text, True)
         md_type_combo.add_attribute(renderer_text, "text", 0)
@@ -750,7 +875,7 @@ class AddDialog(Gtk.Dialog):
     def add_fs_chooser(self):
         label_fs = Gtk.Label(label=_("Filesystem:"), xalign=1)
         label_fs.get_style_context().add_class("dim-label")
-        self.grid.attach(label_fs, 0, 8, 1, 1)
+        self.grid.attach(label_fs, 0, 9, 1, 1)
 
         filesystems_combo = Gtk.ComboBoxText()
         filesystems_combo.set_entry_text_column(0)
@@ -759,7 +884,7 @@ class AddDialog(Gtk.Dialog):
         for fs in self.supported_fs:
             filesystems_combo.append_text(fs)
 
-        self.grid.attach(filesystems_combo, 1, 8, 2, 1)
+        self.grid.attach(filesystems_combo, 1, 9, 2, 1)
 
         if "ext4" in self.supported_fs:
             filesystems_combo.set_active(self.supported_fs.index("ext4"))
@@ -789,19 +914,19 @@ class AddDialog(Gtk.Dialog):
     def add_name_chooser(self):
         label_label = Gtk.Label(label=_("Label:"), xalign=1)
         label_label.get_style_context().add_class("dim-label")
-        self.grid.attach(label_label, 0, 9, 1, 1)
+        self.grid.attach(label_label, 0, 10, 1, 1)
 
         label_entry = Gtk.Entry()
-        self.grid.attach(label_entry, 1, 9, 2, 1)
+        self.grid.attach(label_entry, 1, 10, 2, 1)
 
         self.widgets_dict["label"] = [label_label, label_entry]
 
         name_label = Gtk.Label(label=_("Name:"), xalign=1)
         name_label.get_style_context().add_class("dim-label")
-        self.grid.attach(name_label, 0, 9, 1, 1)
+        self.grid.attach(name_label, 0, 10, 1, 1)
 
         name_entry = Gtk.Entry()
-        self.grid.attach(name_entry, 1, 9, 2, 1)
+        self.grid.attach(name_entry, 1, 10, 2, 1)
 
         self.widgets_dict["name"] = [name_label, name_entry]
 
@@ -810,10 +935,10 @@ class AddDialog(Gtk.Dialog):
     def add_mountpoint(self):
         mountpoint_label = Gtk.Label(label=_("Mountpoint:"), xalign=1)
         mountpoint_label.get_style_context().add_class("dim-label")
-        self.grid.attach(mountpoint_label, 0, 10, 1, 1)
+        self.grid.attach(mountpoint_label, 0, 11, 1, 1)
 
         mountpoint_entry = Gtk.Entry()
-        self.grid.attach(mountpoint_entry, 1, 10, 2, 1)
+        self.grid.attach(mountpoint_entry, 1, 11, 2, 1)
 
         self.widgets_dict["mountpoint"] = [mountpoint_label, mountpoint_entry]
 
@@ -822,25 +947,25 @@ class AddDialog(Gtk.Dialog):
     def add_encrypt_chooser(self):
         encrypt_label = Gtk.Label(label=_("Encrypt:"), xalign=1)
         encrypt_label.get_style_context().add_class("dim-label")
-        self.grid.attach(encrypt_label, 0, 11, 1, 1)
+        self.grid.attach(encrypt_label, 0, 12, 1, 1)
 
         encrypt_check = Gtk.CheckButton()
-        self.grid.attach(encrypt_check, 1, 11, 1, 1)
+        self.grid.attach(encrypt_check, 1, 12, 1, 1)
 
         self.widgets_dict["encrypt"] = [encrypt_label, encrypt_check]
 
         pass_label = Gtk.Label(label=_("Passphrase:"), xalign=1)
         pass_label.get_style_context().add_class("dim-label")
-        self.grid.attach(pass_label, 0, 12, 1, 1)
+        self.grid.attach(pass_label, 0, 13, 1, 1)
 
         pass_entry = Gtk.Entry()
         pass_entry.set_visibility(False)
         pass_entry.set_property("caps-lock-warning", True)
-        self.grid.attach(pass_entry, 1, 12, 2, 1)
+        self.grid.attach(pass_entry, 1, 13, 2, 1)
 
         pass2_label = Gtk.Label(label=_("Repeat Passphrase:"), xalign=1)
         pass2_label.get_style_context().add_class("dim-label")
-        self.grid.attach(pass2_label, 0, 13, 1, 1)
+        self.grid.attach(pass2_label, 0, 14, 1, 1)
 
         pass2_entry = Gtk.Entry()
         pass2_entry.set_visibility(False)
@@ -848,7 +973,7 @@ class AddDialog(Gtk.Dialog):
         pass2_entry.set_icon_activatable(Gtk.EntryIconPosition.SECONDARY, False)
         pass2_entry.set_icon_tooltip_markup(Gtk.EntryIconPosition.SECONDARY, _("Passphrases don't match."))
         pass2_entry.connect("changed", self.on_passphrase_changed, pass_entry)
-        self.grid.attach(pass2_entry, 1, 13, 2, 1)
+        self.grid.attach(pass2_entry, 1, 14, 2, 1)
 
         self.widgets_dict["passphrase"] = [pass_label, pass_entry, pass2_label, pass2_entry]
 
@@ -867,7 +992,7 @@ class AddDialog(Gtk.Dialog):
             self.advanced = AdvancedOptions(self, device_type, self.parent_device, self.free_device)
             self.widgets_dict["advanced"] = [self.advanced]
 
-            self.grid.attach(self.advanced.expander, 0, 14, 6, 1)
+            self.grid.attach(self.advanced.expander, 0, 15, 6, 1)
 
         else:
             self.advanced = None
@@ -934,45 +1059,49 @@ class AddDialog(Gtk.Dialog):
 
         if device_type == "partition":
             self.show_widgets(["label", "fs", "encrypt", "mountpoint", "size", "advanced"])
-            self.hide_widgets(["name", "passphrase", "mdraid"])
+            self.hide_widgets(["name", "passphrase", "mdraid", "cache"])
 
         elif device_type == "lvmpv":
             self.show_widgets(["encrypt", "size"])
-            self.hide_widgets(["name", "label", "fs", "mountpoint", "passphrase", "advanced", "mdraid"])
+            self.hide_widgets(["name", "label", "fs", "mountpoint", "passphrase", "advanced", "mdraid", "cache"])
 
         elif device_type == "lvm":
             self.show_widgets(["encrypt", "name", "size", "advanced"])
-            self.hide_widgets(["label", "fs", "mountpoint", "passphrase", "mdraid"])
+            self.hide_widgets(["label", "fs", "mountpoint", "passphrase", "mdraid", "cache"])
 
         elif device_type == "lvmvg":
             self.show_widgets(["name", "advanced"])
-            self.hide_widgets(["label", "fs", "mountpoint", "encrypt", "size", "passphrase", "mdraid"])
+            self.hide_widgets(["label", "fs", "mountpoint", "encrypt", "size", "passphrase", "mdraid", "cache"])
 
         elif device_type in ("lvmlv", "lvmthinlv"):
             self.show_widgets(["name", "fs", "mountpoint", "size"])
-            self.hide_widgets(["label", "encrypt", "passphrase", "advanced", "mdraid"])
+            self.hide_widgets(["label", "encrypt", "passphrase", "advanced", "mdraid", "cache"])
 
         elif device_type == "btrfs volume":
             self.show_widgets(["name", "size", "mountpoint"])
-            self.hide_widgets(["label", "fs", "encrypt", "passphrase", "advanced", "mdraid"])
+            self.hide_widgets(["label", "fs", "encrypt", "passphrase", "advanced", "mdraid", "cache"])
             self.add_free_type_chooser()
 
         elif device_type == "btrfs subvolume":
             self.show_widgets(["name", "mountpoint"])
-            self.hide_widgets(["label", "fs", "encrypt", "size", "passphrase", "advanced", "mdraid"])
+            self.hide_widgets(["label", "fs", "encrypt", "size", "passphrase", "advanced", "mdraid", "cache"])
 
         elif device_type == "mdraid":
             self.show_widgets(["name", "size", "mountpoint", "fs", "mdraid"])
-            self.hide_widgets(["label", "encrypt", "passphrase", "advanced"])
+            self.hide_widgets(["label", "encrypt", "passphrase", "advanced", "cache"])
 
         elif device_type == "lvm snapshot":
             self.show_widgets(["name", "size"])
-            self.hide_widgets(["label", "fs", "encrypt", "passphrase", "advanced", "mdraid", "mountpoint"])
+            self.hide_widgets(["label", "fs", "encrypt", "passphrase", "advanced", "mdraid", "mountpoint", "cache"])
 
         elif device_type == "lvmthinpool":
             self.show_widgets(["name", "size"])
-            self.hide_widgets(["label", "fs", "encrypt", "passphrase", "advanced", "mdraid", "mountpoint"])
+            self.hide_widgets(["label", "fs", "encrypt", "passphrase", "advanced", "mdraid", "mountpoint", "cache"])
             self.update_size_areas_limits(max_multi=Decimal(0.8))
+
+        elif device_type == "lvmcache":
+            self.show_widgets(["name", "fs", "mountpoint", "size", "cache"])
+            self.hide_widgets(["label", "encrypt", "passphrase", "advanced", "mdraid"])
 
         self.update_raid_type_chooser()
 
@@ -1055,6 +1184,11 @@ class AddDialog(Gtk.Dialog):
             message_dialogs.ErrorDialog(self, msg)
             return False
 
+        if user_input.device_type == "lvmcache" and not user_input.cache.fast_pvs:
+            msg = _("Please select at least one Physical Volume (PV) for cache Logical Volume (LV).")
+            message_dialogs.ErrorDialog(self, msg)
+            return False
+
         return True
 
     def on_ok_clicked(self, _event):
@@ -1096,10 +1230,15 @@ class AddDialog(Gtk.Dialog):
 
         if device_type == "mdraid" and self.md_type_combo.get_active_id() == "lvmpv":
             filesystem = "lvmpv"
-        elif device_type in ("mdraid", "partition", "lvmlv", "lvmthinlv"):
+        elif device_type in ("mdraid", "partition", "lvmlv", "lvmthinlv", "lvmcache"):
             filesystem = self.filesystems_combo.get_active_text()
         else:
             filesystem = None
+
+        if device_type == "lvmcache":
+            cache = self.cache_area.get_selection()
+        else:
+            cache = None
 
         return ProxyDataContainer(device_type=device_type,
                                   size=total_size,
@@ -1112,4 +1251,5 @@ class AddDialog(Gtk.Dialog):
                                   parents=parents,
                                   btrfs_type=btrfs_type,
                                   raid_level=raid_level,
-                                  advanced=advanced)
+                                  advanced=advanced,
+                                  cache=cache)
